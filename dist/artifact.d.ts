@@ -1,4 +1,5 @@
 import { type PartialSemanticValidationResult, type PartialSemanticRepairResult, type SemanticValidationResult, type SemanticViolation } from "./contract/validation.js";
+import { type ArtifactDiagnosticReport } from "./diagnostics.js";
 import { type CanonicalContract } from "./contract/ir.js";
 import { type ValidatedRenderedIssueArtifact, type ValidatedRenderedPullRequestArtifact } from "./github/types.js";
 export interface ArtifactInputMetadata {
@@ -13,6 +14,40 @@ export interface ArtifactInputMetadata {
 export interface ArtifactInputDocument {
     readonly fields: Readonly<Record<string, unknown>>;
     readonly metadata: ArtifactInputMetadata;
+}
+/**
+ * A representation-independent candidate entering the canonical contract.
+ * Adapters may decode JSON, native Markdown, an existing GitHub body, or
+ * internal field input, but they never validate or materialize contract
+ * semantics themselves.
+ */
+export type ArtifactCandidateSource = "json" | "markdown" | "existing" | "fields";
+export interface ArtifactCandidate {
+    readonly fields: unknown;
+    readonly metadata: ArtifactInputMetadata;
+    readonly source: ArtifactCandidateSource;
+}
+export interface ArtifactCandidateAdapterResult {
+    readonly parsed: boolean;
+    readonly candidate?: ArtifactCandidate;
+    readonly diagnostics: readonly ExistingArtifactDiagnostic[];
+}
+/** Result of the one candidate -> selected contract -> canonical JSON boundary. */
+export interface CanonicalArtifactLoadResult {
+    readonly valid: boolean;
+    readonly complete: boolean;
+    /** Canonical contract-shaped semantic JSON. Never contains rejected fields. */
+    readonly canonical: Readonly<Record<string, unknown>>;
+    /** Explicit alias for callers that name the output canonical JSON. */
+    readonly canonicalJson: Readonly<Record<string, unknown>>;
+    /** Backward-compatible semantic value name used by renderer callers. */
+    readonly values: Readonly<Record<string, unknown>>;
+    readonly candidate: ArtifactCandidate;
+    readonly acceptedFields: readonly string[];
+    readonly missingFields: PartialSemanticValidationResult["missingFields"];
+    readonly invalidFields: PartialSemanticValidationResult["invalidFields"];
+    readonly diagnostics: ArtifactDiagnosticReport;
+    readonly violations: readonly SemanticViolation[];
 }
 export interface ArtifactMetadataViolation {
     readonly code: "INPUT_METADATA_INVALID";
@@ -89,6 +124,33 @@ export interface FetchedExistingArtifact {
 }
 /** Parse the documented JSON input envelope while keeping field semantics adapter-independent. */
 export declare function parseArtifactInputDocument(input: unknown): ArtifactInputDocument;
+/** Adapt a parsed JSON envelope without granting it canonical status. */
+export declare function adaptJsonArtifactCandidate(input: unknown): ArtifactCandidate;
+/** Adapt internal structured fields to the same candidate shape as JSON. */
+export declare function adaptFieldArtifactCandidate(fields: unknown, metadata?: ArtifactInputMetadata): ArtifactCandidate;
+/** Alias used by command adapters that call this input the CLI field path. */
+export declare const adaptCliFieldCandidate: typeof adaptFieldArtifactCandidate;
+/** Generic adapter spelling for callers that already hold structured fields. */
+export declare const adaptArtifactCandidate: typeof adaptFieldArtifactCandidate;
+/** Adapt an existing native artifact body through the repository parser. */
+export declare function adaptMarkdownArtifactCandidate(contractInput: unknown, body: string | null | undefined): ArtifactCandidateAdapterResult;
+/** Existing GitHub bodies use the same native Markdown adapter by design. */
+export declare function adaptExistingArtifactCandidate(contractInput: unknown, body: string | null | undefined): ArtifactCandidateAdapterResult;
+/**
+ * Reload a candidate against the selected canonical contract.  Complete input
+ * takes the normal one-pass validator (and therefore may materialize contract
+ * defaults); incomplete/invalid input uses the bounded partial contract and
+ * exposes only accepted semantic values.
+ */
+export declare function loadCanonicalArtifact(contractInput: unknown, candidateInput: unknown): CanonicalArtifactLoadResult;
+/** Explicitly named alias for callers that pass a candidate object. */
+export declare const loadCanonicalCandidate: typeof loadCanonicalArtifact;
+/** Load a JSON representation through the canonical contract boundary. */
+export declare function loadCanonicalJsonArtifact(contractInput: unknown, input: unknown): CanonicalArtifactLoadResult;
+/** Load native Markdown through the same parser and canonical contract. */
+export declare function loadCanonicalMarkdownArtifact(contractInput: unknown, body: string | null | undefined): CanonicalArtifactLoadResult;
+/** Existing-body spelling retained so read/repair callers share one boundary. */
+export declare function loadCanonicalExistingArtifact(contractInput: unknown, body: string | null | undefined): CanonicalArtifactLoadResult;
 /** Classify an artifact input envelope without applying semantic defaults. */
 export declare function validatePartialArtifactInput(contractInput: unknown, input: unknown): PartialSemanticValidationResult;
 /** Terminology alias for callers that treat validation as classification. */

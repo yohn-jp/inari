@@ -5,6 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ArtifactInputError,
+  loadCanonicalArtifact,
   parseArtifactInputDocument,
   prepareIssueArtifact,
   preparePullRequestArtifact,
@@ -13,12 +14,7 @@ import {
   renderPullRequestArtifact,
   type ArtifactInputDocument,
 } from "./artifact.js";
-import {
-  projectContract,
-  type CanonicalContract,
-  SemanticValidationError,
-  validateSemanticInput,
-} from "./contract/index.js";
+import { projectContract, type CanonicalContract, SemanticValidationError } from "./contract/index.js";
 import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
 import {
   compileLocalGovernedContract,
@@ -689,9 +685,9 @@ async function runArtifactCommand(
       const document = await readInputDocument(parsed.options.from);
       const preparedDocument = mergeOptionMetadata(document, parsed.options);
       if (command === "validate") {
-        const validation = validateSemanticInput(contract, preparedDocument.fields);
+        const validation = loadCanonicalArtifact(contract, preparedDocument);
         console.log(
-          JSON.stringify({ valid: validation.valid, violations: validation.violations, values: validation.values }),
+          JSON.stringify({ valid: validation.valid, violations: validation.violations, values: validation.canonical }),
         );
         return validation.valid ? 0 : EXIT_VALIDATION;
       }

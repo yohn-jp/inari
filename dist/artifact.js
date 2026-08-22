@@ -1,4 +1,5 @@
 import { repairPartialSemanticInput, SemanticValidationError, validatePartialSemanticInput, validateSemanticInput, } from "./contract/validation.js";
+import { createArtifactDiagnostic, createArtifactDiagnosticReport, } from "./diagnostics.js";
 import { assertCanonicalContract, } from "./contract/ir.js";
 import { createValidatedRenderedIssueArtifact, createValidatedRenderedPullRequestArtifact, } from "./github/capability.js";
 export class ArtifactInputError extends Error {
@@ -47,6 +48,176 @@ export function parseArtifactInputDocument(input) {
     }
     return { fields: input, metadata: {} };
 }
+/** Adapt a parsed JSON envelope without granting it canonical status. */
+export function adaptJsonArtifactCandidate(input) {
+    const document = parseArtifactInputDocument(input);
+    return { ...document, source: "json" };
+}
+/** Adapt internal structured fields to the same candidate shape as JSON. */
+export function adaptFieldArtifactCandidate(fields, metadata = {}) {
+    if (!isRecord(fields)) {
+        throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "Candidate fields must be an object.", "$.fields");
+    }
+    return { fields, metadata, source: "fields" };
+}
+/** Alias used by command adapters that call this input the CLI field path. */
+export const adaptCliFieldCandidate = adaptFieldArtifactCandidate;
+/** Generic adapter spelling for callers that already hold structured fields. */
+export const adaptArtifactCandidate = adaptFieldArtifactCandidate;
+/** Adapt an existing native artifact body through the repository parser. */
+export function adaptMarkdownArtifactCandidate(contractInput, body) {
+    assertCanonicalContract(contractInput);
+    const contract = contractInput;
+    const parse = contract.artifactKind === "issue"
+        ? parseExistingIssueArtifact(contract, body)
+        : parseExistingPullRequestArtifact(contract, body);
+    if (!parse.parsed)
+        return { parsed: false, diagnostics: parse.diagnostics };
+    return {
+        parsed: true,
+        candidate: { fields: parse.values, metadata: {}, source: "markdown" },
+        diagnostics: parse.diagnostics,
+    };
+}
+/** Existing GitHub bodies use the same native Markdown adapter by design. */
+export function adaptExistingArtifactCandidate(contractInput, body) {
+    const adapted = adaptMarkdownArtifactCandidate(contractInput, body);
+    return adapted.candidate === undefined
+        ? adapted
+        : { ...adapted, candidate: { ...adapted.candidate, source: "existing" } };
+}
+/**
+ * Reload a candidate against the selected canonical contract.  Complete input
+ * takes the normal one-pass validator (and therefore may materialize contract
+ * defaults); incomplete/invalid input uses the bounded partial contract and
+ * exposes only accepted semantic values.
+ */
+export function loadCanonicalArtifact(contractInput, candidateInput) {
+    assertCanonicalContract(contractInput);
+    const candidate = normalizeArtifactCandidate(candidateInput);
+    const validation = validateSemanticInput(contractInput, candidate.fields);
+    if (validation.valid) {
+        const acceptedFields = Object.keys(validation.values)
+            .sort(compareStrings)
+            .map((field) => `$.fields.${field}`);
+        const diagnostics = createArtifactDiagnosticReport([], acceptedFields);
+        return {
+            valid: true,
+            complete: true,
+            canonical: validation.values,
+            canonicalJson: validation.values,
+            values: validation.values,
+            candidate,
+            acceptedFields,
+            missingFields: [],
+            invalidFields: [],
+            diagnostics,
+            violations: [],
+        };
+    }
+    const partial = validatePartialSemanticInput(contractInput, candidate.fields);
+    return {
+        valid: false,
+        complete: false,
+        canonical: partial.values,
+        canonicalJson: partial.values,
+        values: partial.values,
+        candidate,
+        acceptedFields: partial.acceptedFields,
+        missingFields: partial.missingFields,
+        invalidFields: partial.invalidFields,
+        diagnostics: partial.diagnostics,
+        violations: validation.violations,
+    };
+}
+/** Explicitly named alias for callers that pass a candidate object. */
+export const loadCanonicalCandidate = loadCanonicalArtifact;
+/** Load a JSON representation through the canonical contract boundary. */
+export function loadCanonicalJsonArtifact(contractInput, input) {
+    return loadCanonicalArtifact(contractInput, adaptJsonArtifactCandidate(input));
+}
+/** Load native Markdown through the same parser and canonical contract. */
+export function loadCanonicalMarkdownArtifact(contractInput, body) {
+    const adapted = adaptMarkdownArtifactCandidate(contractInput, body);
+    if (!adapted.parsed || adapted.candidate === undefined) {
+        const candidate = { fields: {}, metadata: {}, source: "markdown" };
+        const diagnostics = markdownDiagnostics(adapted.diagnostics);
+        return {
+            valid: false,
+            complete: false,
+            canonical: {},
+            canonicalJson: {},
+            values: {},
+            candidate,
+            acceptedFields: [],
+            missingFields: [],
+            invalidFields: [],
+            diagnostics,
+            violations: [],
+        };
+    }
+    return loadCanonicalArtifact(contractInput, adapted.candidate);
+}
+/** Existing-body spelling retained so read/repair callers share one boundary. */
+export function loadCanonicalExistingArtifact(contractInput, body) {
+    const adapted = adaptExistingArtifactCandidate(contractInput, body);
+    if (!adapted.parsed || adapted.candidate === undefined) {
+        const candidate = { fields: {}, metadata: {}, source: "existing" };
+        const diagnostics = markdownDiagnostics(adapted.diagnostics);
+        return {
+            valid: false,
+            complete: false,
+            canonical: {},
+            canonicalJson: {},
+            values: {},
+            candidate,
+            acceptedFields: [],
+            missingFields: [],
+            invalidFields: [],
+            diagnostics,
+            violations: [],
+        };
+    }
+    return loadCanonicalArtifact(contractInput, adapted.candidate);
+}
+function normalizeArtifactCandidate(input) {
+    if (isArtifactCandidate(input))
+        return input;
+    if (isRecord(input) && input.parsed === true && isArtifactCandidate(input.candidate))
+        return input.candidate;
+    if (isArtifactInputDocument(input))
+        return { ...input, source: "json" };
+    return adaptJsonArtifactCandidate(input);
+}
+function isArtifactCandidate(input) {
+    return (isRecord(input) &&
+        (input.source === "json" ||
+            input.source === "markdown" ||
+            input.source === "existing" ||
+            input.source === "fields") &&
+        Object.prototype.hasOwnProperty.call(input, "fields") &&
+        isRecord(input.metadata));
+}
+function isArtifactInputDocument(input) {
+    return isRecord(input) && Object.prototype.hasOwnProperty.call(input, "fields") && isRecord(input.metadata);
+}
+function markdownDiagnostics(diagnostics) {
+    const projected = diagnostics.slice(0, 32).map((diagnostic) => createArtifactDiagnostic({
+        state: "unsupported",
+        code: "FIELD_UNSUPPORTED",
+        detailCode: diagnostic.code === "EXISTING_AMBIGUOUS_TEMPLATE" ? "TEMPLATE_AMBIGUOUS" : "TEMPLATE_UNPARSEABLE",
+        reason: "unsupported",
+        path: diagnostic.path,
+        message: diagnostic.message,
+        recovery: [
+            {
+                action: diagnostic.code === "EXISTING_AMBIGUOUS_TEMPLATE" ? "select-template" : "retry",
+                path: diagnostic.path,
+            },
+        ],
+    }));
+    return createArtifactDiagnosticReport(projected, []);
+}
 /** Classify an artifact input envelope without applying semantic defaults. */
 export function validatePartialArtifactInput(contractInput, input) {
     assertCanonicalContract(contractInput);
@@ -65,20 +236,20 @@ export function renderIssueArtifact(contractInput, input) {
     assertCanonicalContract(contractInput);
     if (contractInput.artifactKind !== "issue")
         throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "An Issue contract is required.");
-    const validation = validateSemanticInput(contractInput, input);
-    if (!validation.valid)
-        throw new SemanticValidationError(validation.violations);
-    return renderIssueBody(contractInput, validation.values);
+    const loaded = loadCanonicalArtifact(contractInput, input);
+    if (!loaded.valid)
+        throw new SemanticValidationError(loaded.violations);
+    return renderIssueBody(contractInput, loaded.canonical);
 }
 export function renderPullRequestArtifact(contractInput, input) {
     assertCanonicalContract(contractInput);
     if (contractInput.artifactKind !== "pull_request") {
         throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "A pull request contract is required.");
     }
-    const validation = validateSemanticInput(contractInput, input);
-    if (!validation.valid)
-        throw new SemanticValidationError(validation.violations);
-    return renderPullRequestBody(contractInput, validation.values);
+    const loaded = loadCanonicalArtifact(contractInput, input);
+    if (!loaded.valid)
+        throw new SemanticValidationError(loaded.violations);
+    return renderPullRequestBody(contractInput, loaded.canonical);
 }
 /** Construct the only values accepted by the GitHub mutation adapter. */
 export function prepareIssueArtifact(contractInput, input) {
@@ -86,13 +257,13 @@ export function prepareIssueArtifact(contractInput, input) {
     if (contractInput.artifactKind !== "issue")
         throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "An Issue contract is required.");
     requireTrustedProvenance(contractInput);
-    const validation = validateSemanticInput(contractInput, input.fields);
-    if (!validation.valid)
-        throw new SemanticValidationError(validation.violations);
+    const loaded = loadCanonicalArtifact(contractInput, input);
+    if (!loaded.valid)
+        throw new SemanticValidationError(loaded.violations);
     const title = requiredMetadataString(input.metadata.title ?? contractInput.nativeMetadata.title, "title");
     const labels = mergeIssueLabels(contractInput.nativeMetadata.labels, input.metadata.labels);
-    const body = renderIssueBody(contractInput, validation.values);
-    verifyRenderedRoundTrip(contractInput, validation.values, body, "issue");
+    const body = renderIssueBody(contractInput, loaded.canonical);
+    verifyRenderedRoundTrip(contractInput, loaded.canonical, body, "issue");
     const artifact = createValidatedRenderedIssueArtifact({
         kind: "issue",
         title,
@@ -101,7 +272,7 @@ export function prepareIssueArtifact(contractInput, input) {
         ...(labels === undefined ? {} : { labels }),
         ...(input.metadata.assignees === undefined ? {} : { assignees: input.metadata.assignees }),
     });
-    return { input, validation, artifact };
+    return { input, validation: semanticValidationFromLoad(loaded), artifact };
 }
 export function preparePullRequestArtifact(contractInput, input) {
     assertCanonicalContract(contractInput);
@@ -109,14 +280,14 @@ export function preparePullRequestArtifact(contractInput, input) {
         throw new ArtifactInputError("INPUT_DOCUMENT_INVALID", "A pull request contract is required.");
     }
     requireTrustedProvenance(contractInput);
-    const validation = validateSemanticInput(contractInput, input.fields);
-    if (!validation.valid)
-        throw new SemanticValidationError(validation.violations);
+    const loaded = loadCanonicalArtifact(contractInput, input);
+    if (!loaded.valid)
+        throw new SemanticValidationError(loaded.violations);
     const title = requiredMetadataString(input.metadata.title, "title");
     const head = requiredMetadataString(input.metadata.head, "head");
     const base = requiredMetadataString(input.metadata.base, "base");
-    const body = renderPullRequestBody(contractInput, validation.values);
-    verifyRenderedRoundTrip(contractInput, validation.values, body, "pull_request");
+    const body = renderPullRequestBody(contractInput, loaded.canonical);
+    verifyRenderedRoundTrip(contractInput, loaded.canonical, body, "pull_request");
     const artifact = createValidatedRenderedPullRequestArtifact({
         kind: "pull_request",
         title,
@@ -129,7 +300,7 @@ export function preparePullRequestArtifact(contractInput, input) {
             ? {}
             : { maintainerCanModify: input.metadata.maintainerCanModify }),
     });
-    return { input, validation, artifact };
+    return { input, validation: semanticValidationFromLoad(loaded), artifact };
 }
 export function parseExistingIssueArtifact(contractInput, body) {
     assertCanonicalContract(contractInput);
@@ -241,7 +412,11 @@ function validateParsedArtifact(contract, parse) {
             : "unparseable";
         return { valid: false, classification, parse, violations: parse.diagnostics };
     }
-    const semantic = validateSemanticInput(contract, parse.values);
+    const semantic = loadCanonicalArtifact(contract, {
+        fields: parse.values,
+        metadata: {},
+        source: "existing",
+    });
     return {
         valid: semantic.valid,
         classification: semantic.valid ? "valid" : "semantic",
@@ -770,5 +945,8 @@ function isRecord(value) {
 }
 function compareStrings(left, right) {
     return left < right ? -1 : left > right ? 1 : 0;
+}
+function semanticValidationFromLoad(loaded) {
+    return { valid: loaded.valid, violations: loaded.violations, values: loaded.canonical };
 }
 //# sourceMappingURL=artifact.js.map

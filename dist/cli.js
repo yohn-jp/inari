@@ -3,8 +3,8 @@ import { readFile, stat } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ArtifactInputError, parseArtifactInputDocument, prepareIssueArtifact, preparePullRequestArtifact, projectExistingArtifact, renderIssueArtifact, renderPullRequestArtifact, } from "./artifact.js";
-import { projectContract, SemanticValidationError, validateSemanticInput, } from "./contract/index.js";
+import { ArtifactInputError, loadCanonicalArtifact, parseArtifactInputDocument, prepareIssueArtifact, preparePullRequestArtifact, projectExistingArtifact, renderIssueArtifact, renderPullRequestArtifact, } from "./artifact.js";
+import { projectContract, SemanticValidationError } from "./contract/index.js";
 import { GitHubAdapter, isGitHubAdapterError } from "./github/index.js";
 import { compileLocalGovernedContract, compileRepositoryGovernedContract, createGovernedIssue, createGovernedPullRequest, discoverRepositoryTemplates, rejectGovernedPolicyOverride, } from "./governance.js";
 import { discoverTemplates } from "./template-discovery.js";
@@ -503,8 +503,8 @@ async function runArtifactCommand(domain, command, rest, parsed, root, dependenc
             const document = await readInputDocument(parsed.options.from);
             const preparedDocument = mergeOptionMetadata(document, parsed.options);
             if (command === "validate") {
-                const validation = validateSemanticInput(contract, preparedDocument.fields);
-                console.log(JSON.stringify({ valid: validation.valid, violations: validation.violations, values: validation.values }));
+                const validation = loadCanonicalArtifact(contract, preparedDocument);
+                console.log(JSON.stringify({ valid: validation.valid, violations: validation.violations, values: validation.canonical }));
                 return validation.valid ? 0 : EXIT_VALIDATION;
             }
             const body = domain === "issue"
